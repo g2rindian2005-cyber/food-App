@@ -4,19 +4,20 @@ on:
   push:
     branches:
       - main
-  workflow_dispatch:  # Allow manual trigger from GitHub UI
+  workflow_dispatch:
 
 env:
   APP_DIR: /var/www/food-APP
-  AWS_REGION: us-east-1        # Change to your EC2's region
+  AWS_REGION: us-east-1        # ← Change to your EC2's region (e.g. ap-south-1)
 
+# OIDC requires these two permissions on the job
 permissions:
-  id-token: write   # Required for OIDC token request
-  contents: read    # Required for actions/checkout
+  id-token: write   # lets GitHub request an OIDC token
+  contents: read    # lets actions/checkout read the repo
 
 jobs:
   # ─────────────────────────────────────────
-  # JOB 1: Validate & lint the static files
+  # JOB 1: Validate static files
   # ─────────────────────────────────────────
   validate:
     name: ✅ Validate HTML & Files
@@ -40,13 +41,11 @@ jobs:
           done
           echo "All required files found!"
 
-      - name: 🔍 Validate HTML files (basic syntax check)
+      - name: 🔍 Validate HTML files
         run: |
-          echo "Checking HTML files for basic issues..."
           for html_file in $(find . -name "*.html" -not -path "./.git/*"); do
             if [ ! -s "$html_file" ]; then
-              echo "  ❌ Empty file: $html_file"
-              exit 1
+              echo "  ❌ Empty file: $html_file"; exit 1
             fi
             if ! grep -q "<!DOCTYPE html>" "$html_file"; then
               echo "  ⚠️  Missing DOCTYPE in: $html_file"
@@ -58,16 +57,14 @@ jobs:
       - name: 📊 Show file summary
         run: |
           echo "──────────────────────────────"
-          echo "📁 Project File Summary:"
-          echo "──────────────────────────────"
-          echo "HTML files: $(find . -name '*.html' -not -path './.git/*' | wc -l)"
-          echo "CSS files:  $(find . -name '*.css'  -not -path './.git/*' | wc -l)"
-          echo "JS files:   $(find . -name '*.js'   -not -path './.git/*' | wc -l)"
-          echo "Total size: $(du -sh . --exclude=.git | cut -f1)"
+          echo "HTML: $(find . -name '*.html' -not -path './.git/*' | wc -l) files"
+          echo "CSS:  $(find . -name '*.css'  -not -path './.git/*' | wc -l) files"
+          echo "JS:   $(find . -name '*.js'   -not -path './.git/*' | wc -l) files"
+          echo "Size: $(du -sh . --exclude=.git | cut -f1)"
           echo "──────────────────────────────"
 
   # ─────────────────────────────────────────
-  # JOB 2: Deploy to EC2 via OIDC + SSM
+  # JOB 2: Deploy via OIDC + SSM (no SSH keys)
   # ─────────────────────────────────────────
   deploy:
     name: 🚀 Deploy to EC2
@@ -79,57 +76,45 @@ jobs:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      # ── OIDC: exchange GitHub token for AWS credentials ──────────────
-      - name: 🔐 Configure AWS credentials via OIDC
+      # ── OIDC: get short-lived AWS credentials ─────────────────────────
+      # Requires your IAM role trust policy to allow this repo.
+      # Trust policy "sub" must match: repo:g2rindian2005-cyber/food-App:ref:refs/heads/main
+      - name: 🔐 Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
+          role-session-name: GitHubActions-FoodApp-Deploy
           aws-region: ${{ env.AWS_REGION }}
-          # GitHub's OIDC provider issues a token; AWS STS validates it
-          # and returns short-lived credentials. No long-lived keys needed.
 
-      # ── Verify the assumed role ───────────────────────────────────────
       - name: 🔍 Verify AWS identity
         run: aws sts get-caller-identity
 
-      # ── Deploy via SSM (no SSH, no open port 22 needed) ──────────────
+      # ── Deploy via SSM (port 22 not needed) ───────────────────────────
       - name: 🚀 Deploy to EC2 via SSM
         run: |
-          echo "Sending deploy commands to EC2 via SSM..."
+          echo "Sending deploy commands to EC2 instance ${{ secrets.EC2_INSTANCE_ID }}..."
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --parameters 'commands=[
+            --comment "FoodApp deploy from GitHub Actions" \
+            --parameters commands='[
               "set -e",
-              "echo ──────────────────────────────────────",
-              "echo 🚀 Starting FoodDash Deployment",
-              "echo ──────────────────────────────────────",
-              "echo ⏰ Time: $(date)",
-              "echo 📍 Server: $(hostname)",
               "cd /var/www/food-APP",
-              "echo 📥 Pulling latest code from GitHub...",
               "sudo git fetch origin main",
               "sudo git reset --hard origin/main",
-              "echo 🔐 Setting file permissions...",
               "sudo chown -R www-data:www-data /var/www/food-APP",
               "sudo chmod -R 755 /var/www/food-APP",
-              "echo ♻️ Reloading Nginx...",
-              "sudo nginx -t",
-              "sudo systemctl reload nginx",
-              "echo 🏥 Running health check...",
+              "sudo nginx -t && sudo systemctl reload nginx",
               "sleep 2",
-              "HTTP_STATUS=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost)",
-              "if [ \"$HTTP_STATUS\" = \"200\" ]; then echo ✅ Site is UP - HTTP $HTTP_STATUS; else echo ❌ Health check FAILED - HTTP $HTTP_STATUS; exit 1; fi",
-              "echo ✅ Deployment Successful!"
+              "HTTP=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost); [ \"$HTTP\" = \"200\" ] && echo \"✅ Site UP: $HTTP\" || (echo \"❌ Health check failed: $HTTP\" && exit 1)"
             ]' \
             --query "Command.CommandId" \
             --output text)
 
           echo "SSM Command ID: $COMMAND_ID"
-          echo "Waiting for command to complete..."
+          echo "Waiting for command to complete on EC2..."
 
-          # Poll until command finishes (timeout after 5 minutes)
           for i in $(seq 1 30); do
             sleep 10
             STATUS=$(aws ssm get-command-invocation \
@@ -137,22 +122,18 @@ jobs:
               --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
               --query "Status" \
               --output text 2>/dev/null || echo "Pending")
-
             echo "  [$i/30] Status: $STATUS"
 
             if [ "$STATUS" = "Success" ]; then
-              echo ""
-              echo "✅ SSM command succeeded!"
-              # Print the output from EC2
+              echo "✅ Deployment succeeded!"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
                 --query "StandardOutputContent" \
                 --output text
-              break
-            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ] || [ "$STATUS" = "TimedOut" ]; then
-              echo "❌ SSM command failed with status: $STATUS"
-              # Print error output
+              exit 0
+            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
+              echo "❌ SSM command failed — Status: $STATUS"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
@@ -162,18 +143,20 @@ jobs:
             fi
           done
 
-      - name: 🔔 Notify deployment success
+          echo "❌ Timed out waiting for SSM command"
+          exit 1
+
+      - name: 🔔 Notify success
         if: success()
         run: |
-          echo "✅ Deployment to EC2 completed successfully!"
-          echo "📅 Deployed at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "✅ Deployed successfully!"
+          echo "📅 $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
           echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 Triggered by: ${{ github.actor }}"
+          echo "👤 By: ${{ github.actor }}"
 
-      - name: 🚨 Notify deployment failure
+      - name: 🚨 Notify failure
         if: failure()
         run: |
           echo "❌ Deployment FAILED!"
           echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 Triggered by: ${{ github.actor }}"
-          echo "🔍 Check the logs above for details."
+          echo "👤 By: ${{ github.actor }}"
