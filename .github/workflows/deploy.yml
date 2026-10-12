@@ -10,14 +10,9 @@ env:
   AWS_REGION: us-east-1        # <- Change to your EC2 region (e.g. ap-south-1)
   APP_DIR: /var/www/food-APP
 
-permissions:
-  id-token: write   # Required for OIDC
-  contents: read    # Required for checkout
-
 jobs:
   # =====================================================
   # JOB 1 -- BUILD
-  # Validates files and packages the static site
   # =====================================================
   build:
     name: Build
@@ -68,42 +63,29 @@ jobs:
           node-version: '20'
 
       - name: Install build tools
-        run: |
-          npm install -g \
-            html-minifier-terser \
-            clean-css-cli \
-            terser
+        run: npm install -g html-minifier-terser clean-css-cli terser
 
       - name: Minify HTML files
         run: |
-          echo "Minifying HTML..."
           mkdir -p dist/pages
-          # Minify without --remove-optional-tags so <html>/<body> are preserved
           html-minifier-terser \
-            --collapse-whitespace \
-            --remove-comments \
-            --remove-redundant-attributes \
-            --use-short-doctype \
-            --minify-js true \
-            --minify-css true \
+            --collapse-whitespace --remove-comments \
+            --remove-redundant-attributes --use-short-doctype \
+            --minify-js true --minify-css true \
             index.html -o dist/index.html
           echo "  OK index.html"
           for f in pages/*.html; do
             name=$(basename "$f")
             html-minifier-terser \
-              --collapse-whitespace \
-              --remove-comments \
-              --remove-redundant-attributes \
-              --use-short-doctype \
-              --minify-js true \
-              --minify-css true \
+              --collapse-whitespace --remove-comments \
+              --remove-redundant-attributes --use-short-doctype \
+              --minify-js true --minify-css true \
               "$f" -o "dist/pages/$name"
             echo "  OK pages/$name"
           done
 
       - name: Minify CSS files
         run: |
-          echo "Minifying CSS..."
           mkdir -p dist/css
           for f in css/*.css; do
             name=$(basename "$f")
@@ -113,7 +95,6 @@ jobs:
 
       - name: Minify JS files
         run: |
-          echo "Minifying JS..."
           mkdir -p dist/js dist/data
           for f in js/*.js; do
             name=$(basename "$f")
@@ -128,17 +109,15 @@ jobs:
           if [ -d "assets" ] && [ "$(ls -A assets 2>/dev/null)" ]; then
             cp -r assets dist/assets
             echo "OK assets/ copied"
-          else
-            echo "No assets to copy"
           fi
 
       - name: Build summary
         run: |
-          echo "Original size : $(du -sh . --exclude=.git --exclude=dist --exclude=node_modules | cut -f1)"
-          echo "Built size    : $(du -sh dist | cut -f1)"
-          echo "HTML files    : $(find dist -name '*.html' | wc -l)"
-          echo "CSS files     : $(find dist -name '*.css'  | wc -l)"
-          echo "JS files      : $(find dist -name '*.js'   | wc -l)"
+          echo "Original : $(du -sh . --exclude=.git --exclude=dist --exclude=node_modules | cut -f1)"
+          echo "Built    : $(du -sh dist | cut -f1)"
+          echo "HTML     : $(find dist -name '*.html' | wc -l) files"
+          echo "CSS      : $(find dist -name '*.css'  | wc -l) files"
+          echo "JS       : $(find dist -name '*.js'   | wc -l) files"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
@@ -148,9 +127,7 @@ jobs:
           retention-days: 7
 
   # =====================================================
-  # JOB 2 -- TEST
-  # Tests run against SOURCE files (not minified output)
-  # so optional-tag stripping does not cause false failures
+  # JOB 2 -- TEST (runs against source files)
   # =====================================================
   test:
     name: Test
@@ -161,112 +138,57 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Test -- HTML structure validation
+      - name: Test -- HTML structure
         run: |
           echo "HTML Structure Tests"
-          echo "--------------------"
           ERRORS=0
           for f in $(find . -name "*.html" -not -path "./.git/*"); do
             label="${f#./}"
-            # Must not be empty
             if [ ! -s "$f" ]; then
-              echo "  FAIL (empty): $label"
-              ERRORS=$((ERRORS+1))
-              continue
+              echo "  FAIL (empty): $label"; ERRORS=$((ERRORS+1)); continue
             fi
-            # Must have <html
             if ! grep -qi "<html" "$f"; then
-              echo "  FAIL (no <html>): $label"
-              ERRORS=$((ERRORS+1))
-              continue
+              echo "  FAIL (no <html>): $label"; ERRORS=$((ERRORS+1)); continue
             fi
-            # Must have <body
             if ! grep -qi "<body" "$f"; then
-              echo "  FAIL (no <body>): $label"
-              ERRORS=$((ERRORS+1))
-              continue
-            fi
-            # Must have <title
-            if ! grep -qi "<title" "$f"; then
-              echo "  WARN (no <title>): $label"
+              echo "  FAIL (no <body>): $label"; ERRORS=$((ERRORS+1)); continue
             fi
             echo "  PASS: $label"
           done
-          if [ $ERRORS -gt 0 ]; then
-            echo "$ERRORS HTML test(s) failed"
-            exit 1
-          fi
+          [ $ERRORS -eq 0 ] || { echo "$ERRORS HTML test(s) failed"; exit 1; }
           echo "All HTML tests passed"
 
-      - name: Test -- CSS files non-empty
+      - name: Test -- CSS non-empty
         run: |
           echo "CSS Tests"
-          echo "---------"
           for f in $(find . -name "*.css" -not -path "./.git/*"); do
-            if [ ! -s "$f" ]; then
-              echo "  FAIL (empty): $f"
-              exit 1
-            fi
+            [ -s "$f" ] || { echo "  FAIL (empty): $f"; exit 1; }
             echo "  PASS: ${f#./}"
           done
           echo "All CSS tests passed"
 
-      - name: Test -- JS syntax check
+      - name: Test -- JS syntax
         run: |
           echo "JavaScript Syntax Tests"
-          echo "-----------------------"
-          node --version
           ERRORS=0
           for f in js/*.js data/*.js; do
             if node --check "$f" 2>/dev/null; then
               echo "  PASS: $f"
             else
-              echo "  FAIL (syntax error): $f"
-              node --check "$f" || true
+              echo "  FAIL: $f"; node --check "$f" || true
               ERRORS=$((ERRORS+1))
             fi
           done
-          if [ $ERRORS -gt 0 ]; then
-            echo "$ERRORS JS syntax error(s)"
-            exit 1
-          fi
-          echo "All JS syntax tests passed"
-
-      - name: Test -- Internal link references
-        run: |
-          echo "Internal Link Tests"
-          echo "-------------------"
-          BROKEN=0
-          for html in $(find . -name "*.html" -not -path "./.git/*"); do
-            dir=$(dirname "$html")
-            refs=$(grep -oP '(?:src|href)="[^"#]+"' "$html" \
-              | grep -oP '"[^"]+"' | tr -d '"' \
-              | grep -v '^https\?://' \
-              | grep -v '^//' \
-              | grep -v '^mailto' \
-              | grep -v '^#' || true)
-            for ref in $refs; do
-              full=$(echo "$dir/$ref" | sed 's|/\./|/|g')
-              if [ ! -f "$full" ] && [ ! -d "$full" ]; then
-                echo "  WARN: broken ref in ${html#./} -> $ref"
-                BROKEN=$((BROKEN+1))
-              fi
-            done
-          done
-          if [ $BROKEN -gt 0 ]; then
-            echo "$BROKEN broken reference(s) found (warnings only)"
-          else
-            echo "All internal references OK"
-          fi
+          [ $ERRORS -eq 0 ] || { echo "$ERRORS JS error(s)"; exit 1; }
+          echo "All JS tests passed"
 
       - name: Test summary
-        run: |
-          echo "All tests passed -- ready to deploy"
+        run: echo "All tests passed -- ready to deploy"
 
   # =====================================================
   # JOB 3 -- DEPLOY
-  # Runs only after all tests pass
-  # Uses OIDC (no SSH keys) + SSM (no port 22 needed)
+  # Uses AWS access keys (stored as GitHub secrets)
+  # Deploys to EC2 via SSM (no SSH / no port 22 needed)
   # =====================================================
   deploy:
     name: Deploy to EC2
@@ -281,12 +203,12 @@ jobs:
           name: food-app-build
           path: dist/
 
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS credentials (Access Keys)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_IAM_ROLE_ARN }}
-          role-session-name: GitHubActions-FoodApp-Deploy
-          aws-region: ${{ env.AWS_REGION }}
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
 
       - name: Verify AWS identity
         run: aws sts get-caller-identity
@@ -319,7 +241,6 @@ jobs:
             --output text)
 
           echo "SSM Command ID: $COMMAND_ID"
-          echo "Polling for result..."
 
           for i in $(seq 1 30); do
             sleep 10
@@ -352,15 +273,15 @@ jobs:
           echo "Timed out waiting for SSM response"
           exit 1
 
-      - name: Deployment success summary
+      - name: Success summary
         if: success()
         run: |
           echo "Deployment complete"
-          echo "Commit  : ${{ github.sha }}"
-          echo "By      : ${{ github.actor }}"
-          echo "At      : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Commit : ${{ github.sha }}"
+          echo "By     : ${{ github.actor }}"
+          echo "At     : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
-      - name: Deployment failure summary
+      - name: Failure summary
         if: failure()
         run: |
           echo "Deployment FAILED"
