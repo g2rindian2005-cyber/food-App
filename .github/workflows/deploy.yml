@@ -1,4 +1,4 @@
-name: 🚀 Deploy to AWS EC2
+name: 🚀 CI/CD Pipeline — Build, Test & Deploy
 
 on:
   push:
@@ -7,78 +7,288 @@ on:
   workflow_dispatch:
 
 env:
+  AWS_REGION: us-east-1        # ← Change to your EC2 region (e.g. ap-south-1)
   APP_DIR: /var/www/food-APP
-  AWS_REGION: us-east-1        # ← Change to your EC2's region (e.g. ap-south-1)
 
-# OIDC requires these two permissions on the job
 permissions:
-  id-token: write   # lets GitHub request an OIDC token
-  contents: read    # lets actions/checkout read the repo
+  id-token: write   # Required for OIDC
+  contents: read    # Required for checkout
 
 jobs:
-  # ─────────────────────────────────────────
-  # JOB 1: Validate static files
-  # ─────────────────────────────────────────
-  validate:
-    name: ✅ Validate HTML & Files
+  # ═══════════════════════════════════════════
+  # JOB 1 ── BUILD
+  # Lints, validates, and packages the static site
+  # ═══════════════════════════════════════════
+  build:
+    name: 🔨 Build
     runs-on: ubuntu-latest
 
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      - name: 🔍 Check required files exist
+      - name: 🔍 Verify all required files exist
         run: |
-          echo "Checking required project files..."
-          files=("index.html" "css/style.css" "css/home.css" "js/app.js" "js/home.js" "data/restaurants.js")
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Checking required project files"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          MISSING=0
+          files=(
+            "index.html"
+            "css/style.css"
+            "css/home.css"
+            "js/app.js"
+            "js/home.js"
+            "data/restaurants.js"
+            "pages/menu.html"
+            "pages/login.html"
+            "pages/cart.html"
+            "pages/orders.html"
+            "pages/tracking.html"
+            "pages/admin.html"
+            "pages/statistics.html"
+            "pages/restaurant-dashboard.html"
+            "pages/delivery-dashboard.html"
+          )
           for file in "${files[@]}"; do
             if [ -f "$file" ]; then
               echo "  ✅ $file"
             else
               echo "  ❌ MISSING: $file"
-              exit 1
+              MISSING=$((MISSING + 1))
             fi
           done
-          echo "All required files found!"
+          echo ""
+          if [ $MISSING -gt 0 ]; then
+            echo "❌ Build failed — $MISSING required file(s) missing"
+            exit 1
+          fi
+          echo "✅ All required files present"
 
-      - name: 🔍 Validate HTML files
+      - name: 🏗️ Set up Node.js (for build tools)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 📦 Install build tools
         run: |
-          for html_file in $(find . -name "*.html" -not -path "./.git/*"); do
-            if [ ! -s "$html_file" ]; then
-              echo "  ❌ Empty file: $html_file"; exit 1
-            fi
-            if ! grep -q "<!DOCTYPE html>" "$html_file"; then
-              echo "  ⚠️  Missing DOCTYPE in: $html_file"
-            else
-              echo "  ✅ $html_file"
-            fi
+          npm install -g \
+            html-minifier-terser \
+            clean-css-cli \
+            terser
+
+      - name: 🗜️ Minify HTML files
+        run: |
+          echo "Minifying HTML..."
+          mkdir -p dist/pages
+          # Root HTML
+          html-minifier-terser \
+            --collapse-whitespace \
+            --remove-comments \
+            --remove-optional-tags \
+            --remove-redundant-attributes \
+            --use-short-doctype \
+            --minify-js true \
+            --minify-css true \
+            index.html -o dist/index.html
+          echo "  ✅ index.html"
+          # Pages
+          for f in pages/*.html; do
+            name=$(basename "$f")
+            html-minifier-terser \
+              --collapse-whitespace \
+              --remove-comments \
+              --minify-js true \
+              --minify-css true \
+              "$f" -o "dist/pages/$name"
+            echo "  ✅ pages/$name"
           done
 
-      - name: 📊 Show file summary
+      - name: 🎨 Minify CSS files
         run: |
-          echo "──────────────────────────────"
-          echo "HTML: $(find . -name '*.html' -not -path './.git/*' | wc -l) files"
-          echo "CSS:  $(find . -name '*.css'  -not -path './.git/*' | wc -l) files"
-          echo "JS:   $(find . -name '*.js'   -not -path './.git/*' | wc -l) files"
-          echo "Size: $(du -sh . --exclude=.git | cut -f1)"
-          echo "──────────────────────────────"
+          echo "Minifying CSS..."
+          mkdir -p dist/css
+          for f in css/*.css; do
+            name=$(basename "$f")
+            cleancss -o "dist/css/$name" "$f"
+            echo "  ✅ css/$name"
+          done
 
-  # ─────────────────────────────────────────
-  # JOB 2: Deploy via OIDC + SSM (no SSH keys)
-  # ─────────────────────────────────────────
-  deploy:
-    name: 🚀 Deploy to EC2
+      - name: ⚡ Minify JS files
+        run: |
+          echo "Minifying JS..."
+          mkdir -p dist/js dist/data
+          for f in js/*.js; do
+            name=$(basename "$f")
+            terser "$f" -o "dist/js/$name" --compress --mangle
+            echo "  ✅ js/$name"
+          done
+          # data files (copy as-is — JSON-like JS)
+          cp data/*.js dist/data/
+          echo "  ✅ data/ (copied)"
+
+      - name: 📁 Copy static assets
+        run: |
+          # Copy assets folder if it exists and has files
+          if [ -d "assets" ] && [ "$(ls -A assets)" ]; then
+            cp -r assets dist/assets
+            echo "✅ assets/ copied"
+          fi
+
+      - name: 📊 Build summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Build Output Summary"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Original size : $(du -sh . --exclude=.git --exclude=dist --exclude=node_modules | cut -f1)"
+          echo "Built size    : $(du -sh dist | cut -f1)"
+          echo "HTML files    : $(find dist -name '*.html' | wc -l)"
+          echo "CSS files     : $(find dist -name '*.css'  | wc -l)"
+          echo "JS files      : $(find dist -name '*.js'   | wc -l)"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: 📤 Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: food-app-build
+          path: dist/
+          retention-days: 7
+
+  # ═══════════════════════════════════════════
+  # JOB 2 ── TEST
+  # Runs after build, downloads artifact & tests it
+  # ═══════════════════════════════════════════
+  test:
+    name: 🧪 Test
     runs-on: ubuntu-latest
-    needs: validate
-    environment: production
+    needs: build
 
     steps:
       - name: 📥 Checkout code
         uses: actions/checkout@v4
 
-      # ── OIDC: get short-lived AWS credentials ─────────────────────────
-      # Requires your IAM role trust policy to allow this repo.
-      # Trust policy "sub" must match: repo:g2rindian2005-cyber/food-App:ref:refs/heads/main
+      - name: 📥 Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: food-app-build
+          path: dist/
+
+      - name: 🏷️ Test — HTML structure validation
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  HTML Structure Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          ERRORS=0
+          for f in $(find dist -name "*.html"); do
+            label="${f#dist/}"
+            # Must not be empty
+            if [ ! -s "$f" ]; then
+              echo "  ❌ EMPTY: $label"; ERRORS=$((ERRORS+1)); continue
+            fi
+            # Must have <html>
+            if ! grep -qi "<html" "$f"; then
+              echo "  ❌ Missing <html>: $label"; ERRORS=$((ERRORS+1)); continue
+            fi
+            # Must have <body>
+            if ! grep -qi "<body" "$f"; then
+              echo "  ❌ Missing <body>: $label"; ERRORS=$((ERRORS+1)); continue
+            fi
+            # Must have <title>
+            if ! grep -qi "<title" "$f"; then
+              echo "  ⚠️  Missing <title>: $label"
+            fi
+            echo "  ✅ $label"
+          done
+          [ $ERRORS -eq 0 ] || { echo "❌ $ERRORS HTML test(s) failed"; exit 1; }
+          echo "✅ All HTML tests passed"
+
+      - name: 🎨 Test — CSS files non-empty
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  CSS Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          for f in $(find dist -name "*.css"); do
+            if [ ! -s "$f" ]; then
+              echo "  ❌ EMPTY: $f"; exit 1
+            fi
+            echo "  ✅ ${f#dist/}"
+          done
+          echo "✅ All CSS tests passed"
+
+      - name: ⚡ Test — JS syntax check
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  JavaScript Syntax Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          node --version
+          ERRORS=0
+          # Test source JS files (minified output can't be syntax-checked easily)
+          for f in js/*.js data/*.js; do
+            if node --check "$f" 2>/dev/null; then
+              echo "  ✅ $f"
+            else
+              echo "  ❌ Syntax error: $f"
+              node --check "$f"
+              ERRORS=$((ERRORS+1))
+            fi
+          done
+          [ $ERRORS -eq 0 ] || { echo "❌ $ERRORS JS syntax error(s)"; exit 1; }
+          echo "✅ All JS syntax tests passed"
+
+      - name: 🔗 Test — Check internal link references
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Internal Link Tests"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          BROKEN=0
+          for html in $(find dist -name "*.html"); do
+            dir=$(dirname "$html")
+            # Extract local src/href values (skip http, https, //, #, mailto)
+            refs=$(grep -oP '(?:src|href)="[^"#]+"' "$html" \
+              | grep -oP '"[^"]+"' | tr -d '"' \
+              | grep -v '^https\?://' \
+              | grep -v '^//' \
+              | grep -v '^mailto' \
+              | grep -v '^#' || true)
+            for ref in $refs; do
+              full="$dir/$ref"
+              full=$(echo "$full" | sed 's|/\./|/|g')
+              if [ ! -f "$full" ] && [ ! -d "$full" ]; then
+                echo "  ⚠️  Broken ref in ${html#dist/} → $ref"
+                BROKEN=$((BROKEN+1))
+              fi
+            done
+          done
+          if [ $BROKEN -gt 0 ]; then
+            echo "⚠️  $BROKEN broken reference(s) found (review above)"
+          else
+            echo "✅ All internal references OK"
+          fi
+
+      - name: 📊 Test summary
+        run: |
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  All tests passed ✅"
+          echo "  Ready to deploy"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  # ═══════════════════════════════════════════
+  # JOB 3 ── DEPLOY
+  # Runs after test passes — uses OIDC + SSM
+  # ═══════════════════════════════════════════
+  deploy:
+    name: 🚀 Deploy to EC2
+    runs-on: ubuntu-latest
+    needs: test          # Only deploy if tests pass
+    environment: production
+
+    steps:
+      - name: 📥 Download build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: food-app-build
+          path: dist/
+
       - name: 🔐 Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -89,31 +299,36 @@ jobs:
       - name: 🔍 Verify AWS identity
         run: aws sts get-caller-identity
 
-      # ── Deploy via SSM (port 22 not needed) ───────────────────────────
-      - name: 🚀 Deploy to EC2 via SSM
+      - name: 📤 Sync build to EC2 via SSM
         run: |
-          echo "Sending deploy commands to EC2 instance ${{ secrets.EC2_INSTANCE_ID }}..."
+          echo "Deploying to EC2: ${{ secrets.EC2_INSTANCE_ID }}"
 
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
             --document-name "AWS-RunShellScript" \
-            --comment "FoodApp deploy from GitHub Actions" \
-            --parameters commands='[
+            --comment "FoodApp deploy — commit ${{ github.sha }}" \
+            --parameters 'commands=[
               "set -e",
+              "echo ── Starting FoodDash Deployment ──",
+              "echo Time: $(date)",
+              "echo Commit: '"${{ github.sha }}"'",
               "cd /var/www/food-APP",
               "sudo git fetch origin main",
               "sudo git reset --hard origin/main",
               "sudo chown -R www-data:www-data /var/www/food-APP",
               "sudo chmod -R 755 /var/www/food-APP",
-              "sudo nginx -t && sudo systemctl reload nginx",
+              "sudo nginx -t",
+              "sudo systemctl reload nginx",
               "sleep 2",
-              "HTTP=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost); [ \"$HTTP\" = \"200\" ] && echo \"✅ Site UP: $HTTP\" || (echo \"❌ Health check failed: $HTTP\" && exit 1)"
+              "HTTP=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost)",
+              "echo Health check: $HTTP",
+              "[ \"$HTTP\" = \"200\" ] && echo SUCCESS || (echo FAILED && exit 1)"
             ]' \
             --query "Command.CommandId" \
             --output text)
 
           echo "SSM Command ID: $COMMAND_ID"
-          echo "Waiting for command to complete on EC2..."
+          echo "Polling for result..."
 
           for i in $(seq 1 30); do
             sleep 10
@@ -122,18 +337,24 @@ jobs:
               --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
               --query "Status" \
               --output text 2>/dev/null || echo "Pending")
-            echo "  [$i/30] Status: $STATUS"
+            echo "  [$i/30] $STATUS"
 
             if [ "$STATUS" = "Success" ]; then
-              echo "✅ Deployment succeeded!"
+              echo ""
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "  EC2 Output:"
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
                 --query "StandardOutputContent" \
                 --output text
+              echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+              echo "✅ Deployment succeeded!"
               exit 0
             elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
-              echo "❌ SSM command failed — Status: $STATUS"
+              echo ""
+              echo "❌ Deployment failed — Status: $STATUS"
               aws ssm get-command-invocation \
                 --command-id "$COMMAND_ID" \
                 --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
@@ -143,20 +364,27 @@ jobs:
             fi
           done
 
-          echo "❌ Timed out waiting for SSM command"
+          echo "❌ Timed out waiting for SSM response"
           exit 1
 
-      - name: 🔔 Notify success
+      - name: 🔔 Deployment success summary
         if: success()
         run: |
-          echo "✅ Deployed successfully!"
-          echo "📅 $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-          echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 By: ${{ github.actor }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ✅ Deployment Complete"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Commit  : ${{ github.sha }}"
+          echo "  By      : ${{ github.actor }}"
+          echo "  At      : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-      - name: 🚨 Notify failure
+      - name: 🚨 Deployment failure summary
         if: failure()
         run: |
-          echo "❌ Deployment FAILED!"
-          echo "📝 Commit: ${{ github.sha }}"
-          echo "👤 By: ${{ github.actor }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  ❌ Deployment FAILED"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "  Commit  : ${{ github.sha }}"
+          echo "  By      : ${{ github.actor }}"
+          echo "  Check the logs above for details"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
