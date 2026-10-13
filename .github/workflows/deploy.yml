@@ -1,4 +1,4 @@
-name: 🚀 CI/CD Pipeline — Build, Test, Dockerize & Deploy to Kubernetes
+name: CI/CD Pipeline - Build, Test, Dockerize & Deploy to Kubernetes
 
 on:
   push:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   # =====================================================
-  # JOB 1 -- BUILD & TEST (source files)
+  # JOB 1 -- BUILD & TEST
   # =====================================================
   build-test:
     name: Build & Test
@@ -25,7 +25,6 @@ jobs:
 
       - name: Verify required files exist
         run: |
-          echo "Checking required project files..."
           MISSING=0
           files=(
             "index.html" "css/style.css" "css/home.css"
@@ -47,9 +46,9 @@ jobs:
           ERRORS=0
           for f in $(find . -name "*.html" -not -path "./.git/*"); do
             label="${f#./}"
-            [ -s "$f" ]           || { echo "FAIL empty: $label";      ERRORS=$((ERRORS+1)); continue; }
-            grep -qi "<html" "$f" || { echo "FAIL no <html>: $label";  ERRORS=$((ERRORS+1)); continue; }
-            grep -qi "<body" "$f" || { echo "FAIL no <body>: $label";  ERRORS=$((ERRORS+1)); continue; }
+            [ -s "$f" ]           || { echo "FAIL empty: $label";    ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<html" "$f" || { echo "FAIL no html: $label";  ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<body" "$f" || { echo "FAIL no body: $label";  ERRORS=$((ERRORS+1)); continue; }
             echo "  PASS: $label"
           done
           [ $ERRORS -eq 0 ] || { echo "$ERRORS HTML test(s) failed"; exit 1; }
@@ -114,11 +113,12 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image summary
-        run: |
-          echo "Image pushed: ${{ steps.meta.outputs.tags }}"
+        run: echo "Image pushed -- ${{ steps.meta.outputs.tags }}"
 
   # =====================================================
   # JOB 3 -- DEPLOY TO KUBERNETES
+  # aws-actions/configure-aws-credentials exports creds
+  # as env vars for ALL steps in this job automatically
   # =====================================================
   deploy:
     name: Deploy to Kubernetes
@@ -135,14 +135,21 @@ jobs:
         with:
           version: 'latest'
 
-      - name: Configure kubectl (AWS EKS)
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      - name: Verify AWS identity
+        run: aws sts get-caller-identity
+
+      - name: Configure kubectl for EKS
         run: |
           aws eks update-kubeconfig \
             --region ${{ secrets.AWS_REGION }} \
             --name ${{ secrets.EKS_CLUSTER_NAME }}
-        env:
-          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
       - name: Apply Kubernetes manifests
         run: |
@@ -167,12 +174,12 @@ jobs:
 
       - name: Verify deployment
         run: |
-          echo "Pods:"
+          echo "--- Pods ---"
           kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=food-app
-          echo "Service:"
-          kubectl get svc  -n ${{ env.K8S_NAMESPACE }}
-          echo "HPA:"
-          kubectl get hpa  -n ${{ env.K8S_NAMESPACE }}
+          echo "--- Service ---"
+          kubectl get svc -n ${{ env.K8S_NAMESPACE }}
+          echo "--- HPA ---"
+          kubectl get hpa -n ${{ env.K8S_NAMESPACE }}
 
       - name: Success summary
         if: success()
@@ -188,5 +195,5 @@ jobs:
         run: |
           echo "Deployment failed -- rolling back..."
           kubectl rollout undo deployment/${{ env.K8S_DEPLOYMENT }} \
-            -n ${{ env.K8S_NAMESPACE }}
+            -n ${{ env.K8S_NAMESPACE }} || echo "Nothing to rollback yet"
           echo "Rollback complete"
