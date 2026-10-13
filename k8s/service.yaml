@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: food-app-service
+  namespace: food-app
+  labels:
+    app: food-app
+spec:
+  type: LoadBalancer          # Exposes app externally (use ClusterIP if using Ingress)
+  selector:
+    app: food-app
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80                # External port
+      targetPort: 80          # Container port

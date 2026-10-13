@@ -1,4 +1,4 @@
-name: 🚀 CI/CD Pipeline — Build, Test & Deploy
+name: 🚀 CI/CD Pipeline — Build, Test, Dockerize & Deploy to Kubernetes
 
 on:
   push:
@@ -7,283 +7,202 @@ on:
   workflow_dispatch:
 
 env:
-  AWS_REGION: us-east-1        # <- Change to your EC2 region (e.g. ap-south-1)
-  APP_DIR: /var/www/food-APP
+  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/food-app
+  K8S_NAMESPACE: food-app
+  K8S_DEPLOYMENT: food-app
 
 jobs:
   # =====================================================
-  # JOB 1 -- BUILD
+  # JOB 1 -- BUILD & TEST (source files)
   # =====================================================
-  build:
-    name: Build
+  build-test:
+    name: Build & Test
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Verify all required files exist
+      - name: Verify required files exist
         run: |
           echo "Checking required project files..."
           MISSING=0
           files=(
-            "index.html"
-            "css/style.css"
-            "css/home.css"
-            "js/app.js"
-            "js/home.js"
-            "data/restaurants.js"
-            "pages/menu.html"
-            "pages/login.html"
-            "pages/cart.html"
-            "pages/orders.html"
-            "pages/tracking.html"
-            "pages/admin.html"
-            "pages/statistics.html"
-            "pages/restaurant-dashboard.html"
+            "index.html" "css/style.css" "css/home.css"
+            "js/app.js" "js/home.js" "data/restaurants.js"
+            "pages/menu.html" "pages/login.html" "pages/cart.html"
+            "pages/orders.html" "pages/tracking.html" "pages/admin.html"
+            "pages/statistics.html" "pages/restaurant-dashboard.html"
             "pages/delivery-dashboard.html"
           )
           for file in "${files[@]}"; do
-            if [ -f "$file" ]; then
-              echo "  OK $file"
-            else
-              echo "  MISSING: $file"
-              MISSING=$((MISSING + 1))
-            fi
+            if [ -f "$file" ]; then echo "  OK $file"
+            else echo "  MISSING: $file"; MISSING=$((MISSING+1)); fi
           done
-          if [ $MISSING -gt 0 ]; then
-            echo "Build failed -- $MISSING required file(s) missing"
-            exit 1
-          fi
+          [ $MISSING -eq 0 ] || { echo "$MISSING file(s) missing"; exit 1; }
           echo "All required files present"
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install build tools
-        run: npm install -g html-minifier-terser clean-css-cli terser
-
-      - name: Minify HTML files
-        run: |
-          mkdir -p dist/pages
-          html-minifier-terser \
-            --collapse-whitespace --remove-comments \
-            --remove-redundant-attributes --use-short-doctype \
-            --minify-js true --minify-css true \
-            index.html -o dist/index.html
-          echo "  OK index.html"
-          for f in pages/*.html; do
-            name=$(basename "$f")
-            html-minifier-terser \
-              --collapse-whitespace --remove-comments \
-              --remove-redundant-attributes --use-short-doctype \
-              --minify-js true --minify-css true \
-              "$f" -o "dist/pages/$name"
-            echo "  OK pages/$name"
-          done
-
-      - name: Minify CSS files
-        run: |
-          mkdir -p dist/css
-          for f in css/*.css; do
-            name=$(basename "$f")
-            cleancss -o "dist/css/$name" "$f"
-            echo "  OK css/$name"
-          done
-
-      - name: Minify JS files
-        run: |
-          mkdir -p dist/js dist/data
-          for f in js/*.js; do
-            name=$(basename "$f")
-            terser "$f" -o "dist/js/$name" --compress --mangle
-            echo "  OK js/$name"
-          done
-          cp data/*.js dist/data/
-          echo "  OK data/ (copied)"
-
-      - name: Copy static assets
-        run: |
-          if [ -d "assets" ] && [ "$(ls -A assets 2>/dev/null)" ]; then
-            cp -r assets dist/assets
-            echo "OK assets/ copied"
-          fi
-
-      - name: Build summary
-        run: |
-          echo "Original : $(du -sh . --exclude=.git --exclude=dist --exclude=node_modules | cut -f1)"
-          echo "Built    : $(du -sh dist | cut -f1)"
-          echo "HTML     : $(find dist -name '*.html' | wc -l) files"
-          echo "CSS      : $(find dist -name '*.css'  | wc -l) files"
-          echo "JS       : $(find dist -name '*.js'   | wc -l) files"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: food-app-build
-          path: dist/
-          retention-days: 7
-
-  # =====================================================
-  # JOB 2 -- TEST (runs against source files)
-  # =====================================================
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-    needs: build
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
 
       - name: Test -- HTML structure
         run: |
-          echo "HTML Structure Tests"
           ERRORS=0
           for f in $(find . -name "*.html" -not -path "./.git/*"); do
             label="${f#./}"
-            if [ ! -s "$f" ]; then
-              echo "  FAIL (empty): $label"; ERRORS=$((ERRORS+1)); continue
-            fi
-            if ! grep -qi "<html" "$f"; then
-              echo "  FAIL (no <html>): $label"; ERRORS=$((ERRORS+1)); continue
-            fi
-            if ! grep -qi "<body" "$f"; then
-              echo "  FAIL (no <body>): $label"; ERRORS=$((ERRORS+1)); continue
-            fi
+            [ -s "$f" ]          || { echo "FAIL empty: $label";      ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<html" "$f" || { echo "FAIL no <html>: $label"; ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<body" "$f" || { echo "FAIL no <body>: $label"; ERRORS=$((ERRORS+1)); continue; }
             echo "  PASS: $label"
           done
           [ $ERRORS -eq 0 ] || { echo "$ERRORS HTML test(s) failed"; exit 1; }
           echo "All HTML tests passed"
 
-      - name: Test -- CSS non-empty
-        run: |
-          echo "CSS Tests"
-          for f in $(find . -name "*.css" -not -path "./.git/*"); do
-            [ -s "$f" ] || { echo "  FAIL (empty): $f"; exit 1; }
-            echo "  PASS: ${f#./}"
-          done
-          echo "All CSS tests passed"
-
       - name: Test -- JS syntax
         run: |
-          echo "JavaScript Syntax Tests"
           ERRORS=0
           for f in js/*.js data/*.js; do
-            if node --check "$f" 2>/dev/null; then
-              echo "  PASS: $f"
-            else
-              echo "  FAIL: $f"; node --check "$f" || true
-              ERRORS=$((ERRORS+1))
-            fi
+            node --check "$f" 2>/dev/null && echo "  PASS: $f" || { echo "  FAIL: $f"; ERRORS=$((ERRORS+1)); }
           done
           [ $ERRORS -eq 0 ] || { echo "$ERRORS JS error(s)"; exit 1; }
           echo "All JS tests passed"
 
-      - name: Test summary
-        run: echo "All tests passed -- ready to deploy"
+      - name: Test -- CSS non-empty
+        run: |
+          for f in $(find . -name "*.css" -not -path "./.git/*"); do
+            [ -s "$f" ] && echo "  PASS: ${f#./}" || { echo "  FAIL empty: $f"; exit 1; }
+          done
+          echo "All CSS tests passed"
 
   # =====================================================
-  # JOB 3 -- DEPLOY
-  # Uses AWS access keys (stored as GitHub secrets)
-  # Deploys to EC2 via SSM (no SSH / no port 22 needed)
+  # JOB 2 -- DOCKER BUILD & PUSH
+  # Builds image and pushes to Docker Hub
+  # Image tagged with both git SHA and "latest"
+  # =====================================================
+  docker:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: build-test
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract image metadata (tags & labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image summary
+        run: |
+          echo "Image pushed:"
+          echo "${{ steps.meta.outputs.tags }}"
+
+  # =====================================================
+  # JOB 3 -- DEPLOY TO KUBERNETES
+  # Updates the deployment image and waits for rollout
   # =====================================================
   deploy:
-    name: Deploy to EC2
+    name: Deploy to Kubernetes
     runs-on: ubuntu-latest
-    needs: test
+    needs: docker
     environment: production
 
     steps:
-      - name: Download build artifact
-        uses: actions/download-artifact@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v4
         with:
-          name: food-app-build
-          path: dist/
+          version: 'latest'
 
-      - name: Configure AWS credentials (Access Keys)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region:            ${{ env.AWS_REGION }}
-
-      - name: Verify AWS identity
-        run: aws sts get-caller-identity
-
-      - name: Deploy to EC2 via SSM
+      - name: Configure kubectl (AWS EKS)
+        # If using EKS — comment out if using a different cluster
         run: |
-          echo "Deploying to EC2: ${{ secrets.EC2_INSTANCE_ID }}"
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ secrets.EKS_CLUSTER_NAME }}
+        env:
+          AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${{ secrets.EC2_INSTANCE_ID }}" \
-            --document-name "AWS-RunShellScript" \
-            --comment "FoodApp deploy - ${{ github.sha }}" \
-            --parameters 'commands=[
-              "set -e",
-              "echo Starting FoodDash Deployment",
-              "echo Time: $(date)",
-              "cd /var/www/food-APP",
-              "sudo git fetch origin main",
-              "sudo git reset --hard origin/main",
-              "sudo chown -R www-data:www-data /var/www/food-APP",
-              "sudo chmod -R 755 /var/www/food-APP",
-              "sudo nginx -t",
-              "sudo systemctl reload nginx",
-              "sleep 2",
-              "HTTP=$(curl -s -o /dev/null -w \"%{http_code}\" http://localhost)",
-              "echo Health check HTTP: $HTTP",
-              "[ \"$HTTP\" = \"200\" ] && echo Deployment successful || (echo Health check failed && exit 1)"
-            ]' \
-            --query "Command.CommandId" \
-            --output text)
+      # Uncomment below if using a generic kubeconfig instead of EKS:
+      # - name: Configure kubectl (generic)
+      #   run: |
+      #     mkdir -p ~/.kube
+      #     echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
+      #     chmod 600 ~/.kube/config
 
-          echo "SSM Command ID: $COMMAND_ID"
+      - name: Apply Kubernetes manifests
+        run: |
+          echo "Applying k8s manifests..."
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+          kubectl apply -f k8s/hpa.yaml
+          # kubectl apply -f k8s/ingress.yaml   # Uncomment when Ingress controller is set up
 
-          for i in $(seq 1 30); do
-            sleep 10
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "$COMMAND_ID" \
-              --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-              --query "Status" \
-              --output text 2>/dev/null || echo "Pending")
-            echo "  [$i/30] $STATUS"
+      - name: Update deployment image
+        run: |
+          IMAGE="${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.image-tag }}"
+          echo "Deploying image: $IMAGE"
+          kubectl set image deployment/${{ env.K8S_DEPLOYMENT }} \
+            food-app=$IMAGE \
+            -n ${{ env.K8S_NAMESPACE }}
 
-            if [ "$STATUS" = "Success" ]; then
-              echo "Deployment succeeded"
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" \
-                --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-                --query "StandardOutputContent" \
-                --output text
-              exit 0
-            elif [[ "$STATUS" == "Failed" || "$STATUS" == "Cancelled" || "$STATUS" == "TimedOut" ]]; then
-              echo "Deployment failed -- Status: $STATUS"
-              aws ssm get-command-invocation \
-                --command-id "$COMMAND_ID" \
-                --instance-id "${{ secrets.EC2_INSTANCE_ID }}" \
-                --query "StandardErrorContent" \
-                --output text
-              exit 1
-            fi
-          done
+      - name: Wait for rollout to complete
+        run: |
+          kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT }} \
+            -n ${{ env.K8S_NAMESPACE }} \
+            --timeout=300s
 
-          echo "Timed out waiting for SSM response"
-          exit 1
+      - name: Verify pods are running
+        run: |
+          echo "Pod status:"
+          kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=food-app
+          echo ""
+          echo "Service:"
+          kubectl get svc -n ${{ env.K8S_NAMESPACE }}
+          echo ""
+          echo "HPA:"
+          kubectl get hpa -n ${{ env.K8S_NAMESPACE }}
 
       - name: Success summary
         if: success()
         run: |
           echo "Deployment complete"
+          echo "Image  : ${{ env.IMAGE_NAME }}:${{ needs.docker.outputs.image-tag }}"
           echo "Commit : ${{ github.sha }}"
           echo "By     : ${{ github.actor }}"
           echo "At     : $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
-      - name: Failure summary
+      - name: Rollback on failure
         if: failure()
         run: |
-          echo "Deployment FAILED"
-          echo "Commit : ${{ github.sha }}"
-          echo "By     : ${{ github.actor }}"
+          echo "Deployment failed -- rolling back..."
+          kubectl rollout undo deployment/${{ env.K8S_DEPLOYMENT }} \
+            -n ${{ env.K8S_NAMESPACE }}
+          echo "Rollback complete"

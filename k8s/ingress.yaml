@@ -1,0 +1,28 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: food-app-ingress
+  namespace: food-app
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"     # Set "true" when you have TLS
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: food-app.example.com                          # <- Replace with your domain
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: food-app-service
+                port:
+                  number: 80
+
+  # Uncomment when you have a TLS certificate (e.g. cert-manager)
+  # tls:
+  #   - hosts:
+  #       - food-app.example.com
+  #     secretName: food-app-tls
