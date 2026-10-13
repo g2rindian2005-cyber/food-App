@@ -22,7 +22,7 @@ spec:
     spec:
       containers:
         - name: food-app
-          image: YOUR_DOCKERHUB_USERNAME/food-app:latest   # <- update this
+          image: jawandockerhub/foodapp:latest   # <- update this
           imagePullPolicy: Always
           ports:
             - containerPort: 80
