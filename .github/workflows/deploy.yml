@@ -47,9 +47,9 @@ jobs:
           ERRORS=0
           for f in $(find . -name "*.html" -not -path "./.git/*"); do
             label="${f#./}"
-            [ -s "$f" ]          || { echo "FAIL empty: $label";      ERRORS=$((ERRORS+1)); continue; }
-            grep -qi "<html" "$f" || { echo "FAIL no <html>: $label"; ERRORS=$((ERRORS+1)); continue; }
-            grep -qi "<body" "$f" || { echo "FAIL no <body>: $label"; ERRORS=$((ERRORS+1)); continue; }
+            [ -s "$f" ]           || { echo "FAIL empty: $label";      ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<html" "$f" || { echo "FAIL no <html>: $label";  ERRORS=$((ERRORS+1)); continue; }
+            grep -qi "<body" "$f" || { echo "FAIL no <body>: $label";  ERRORS=$((ERRORS+1)); continue; }
             echo "  PASS: $label"
           done
           [ $ERRORS -eq 0 ] || { echo "$ERRORS HTML test(s) failed"; exit 1; }
@@ -73,8 +73,6 @@ jobs:
 
   # =====================================================
   # JOB 2 -- DOCKER BUILD & PUSH
-  # Builds image and pushes to Docker Hub
-  # Image tagged with both git SHA and "latest"
   # =====================================================
   docker:
     name: Docker Build & Push
@@ -96,7 +94,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract image metadata (tags & labels)
+      - name: Extract image metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
@@ -117,12 +115,10 @@ jobs:
 
       - name: Image summary
         run: |
-          echo "Image pushed:"
-          echo "${{ steps.meta.outputs.tags }}"
+          echo "Image pushed: ${{ steps.meta.outputs.tags }}"
 
   # =====================================================
   # JOB 3 -- DEPLOY TO KUBERNETES
-  # Updates the deployment image and waits for rollout
   # =====================================================
   deploy:
     name: Deploy to Kubernetes
@@ -140,7 +136,6 @@ jobs:
           version: 'latest'
 
       - name: Configure kubectl (AWS EKS)
-        # If using EKS — comment out if using a different cluster
         run: |
           aws eks update-kubeconfig \
             --region ${{ secrets.AWS_REGION }} \
@@ -149,21 +144,12 @@ jobs:
           AWS_ACCESS_KEY_ID:     ${{ secrets.AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-      # Uncomment below if using a generic kubeconfig instead of EKS:
-      # - name: Configure kubectl (generic)
-      #   run: |
-      #     mkdir -p ~/.kube
-      #     echo "${{ secrets.KUBECONFIG }}" | base64 -d > ~/.kube/config
-      #     chmod 600 ~/.kube/config
-
       - name: Apply Kubernetes manifests
         run: |
-          echo "Applying k8s manifests..."
           kubectl apply -f k8s/namespace.yaml
           kubectl apply -f k8s/deployment.yaml
           kubectl apply -f k8s/service.yaml
           kubectl apply -f k8s/hpa.yaml
-          # kubectl apply -f k8s/ingress.yaml   # Uncomment when Ingress controller is set up
 
       - name: Update deployment image
         run: |
@@ -173,22 +159,20 @@ jobs:
             food-app=$IMAGE \
             -n ${{ env.K8S_NAMESPACE }}
 
-      - name: Wait for rollout to complete
+      - name: Wait for rollout
         run: |
           kubectl rollout status deployment/${{ env.K8S_DEPLOYMENT }} \
             -n ${{ env.K8S_NAMESPACE }} \
             --timeout=300s
 
-      - name: Verify pods are running
+      - name: Verify deployment
         run: |
-          echo "Pod status:"
+          echo "Pods:"
           kubectl get pods -n ${{ env.K8S_NAMESPACE }} -l app=food-app
-          echo ""
           echo "Service:"
-          kubectl get svc -n ${{ env.K8S_NAMESPACE }}
-          echo ""
+          kubectl get svc  -n ${{ env.K8S_NAMESPACE }}
           echo "HPA:"
-          kubectl get hpa -n ${{ env.K8S_NAMESPACE }}
+          kubectl get hpa  -n ${{ env.K8S_NAMESPACE }}
 
       - name: Success summary
         if: success()
